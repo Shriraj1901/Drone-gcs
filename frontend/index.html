@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Drone GCS</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+
+  <!-- ===== Top bar: connection manager ===== -->
+  <header class="topbar">
+    <div class="brand">🛩 Drone GCS</div>
+
+    <div class="conn">
+      <select id="connType" title="Connection type">
+        <option value="sim">Simulation (fake data)</option>
+        <option value="serial">Serial (SiK radio)</option>
+        <option value="udp">UDP (SITL)</option>
+        <option value="tcp">TCP</option>
+      </select>
+
+      <span id="serialFields">
+        <select id="serialPort" title="COM port"></select>
+        <button id="refreshPorts" title="Refresh COM ports">⟳</button>
+        <select id="baud" title="Baud rate">
+          <option>9600</option><option>19200</option><option>38400</option>
+          <option>57600</option><option>115200</option><option>230400</option>
+          <option>921600</option>
+        </select>
+      </span>
+
+      <input id="udpAddr" type="text" placeholder="udp:127.0.0.1:14550">
+      <input id="tcpAddr" type="text" placeholder="tcp:127.0.0.1:5760">
+
+      <button id="connectBtn" class="primary">Connect</button>
+    </div>
+
+    <div class="statusbox">
+      <span id="linkPill" class="pill grey">DISCONNECTED</span>
+      <span id="connMsg" class="msg">Not connected</span>
+    </div>
+  </header>
+
+  <main>
+    <!-- ===== Map ===== -->
+    <section class="map-panel">
+      <div id="map"></div>
+      <div class="map-tools">
+        <label><input type="checkbox" id="followChk" checked> Follow drone</label>
+        <button id="centerBtn">Center</button>
+        <button id="clearTrailBtn">Clear trail</button>
+      </div>
+    </section>
+
+    <!-- ===== Right column: video + commands + HUD + messages ===== -->
+    <aside class="side">
+
+      <!-- ----- Live video ----- -->
+      <section class="panel">
+        <div class="panel-head">
+          <span>Live video</span>
+          <span id="videoStatus" class="pill grey">Stopped</span>
+        </div>
+        <div class="video-controls">
+          <select id="videoType">
+            <option value="test">Test pattern (no camera)</option>
+            <option value="webcam">Webcam / USB capture card</option>
+            <option value="rtsp">RTSP URL</option>
+            <option value="udp">UDP port</option>
+          </select>
+          <input id="videoValue" type="text">
+          <button id="videoBtn" class="primary">Start video</button>
+        </div>
+        <div class="video-box">
+          <div id="videoPlaceholder">No video</div>
+          <img id="videoImg" alt="Live video" hidden>
+        </div>
+      </section>
+
+      <!-- ----- Commands (Phase 2) ----- -->
+      <section class="panel" id="cmdPanel">
+        <div class="panel-head">
+          <span>Commands</span>
+          <button id="lockBtn" class="lock">🔒 Locked</button>
+        </div>
+        <div id="cmdNote" class="cmd-note"></div>
+        <div class="cmd-grid">
+          <button id="armBtn" data-cmd="arm" class="cmd warn">Arm</button>
+          <button id="disarmBtn" data-cmd="disarm" class="cmd">Disarm</button>
+          <button id="landBtn" data-cmd="land" class="cmd">Land</button>
+          <button id="rtlBtn" data-cmd="rtl" class="cmd">RTL</button>
+        </div>
+        <div class="cmd-row">
+          <input id="takeoffAlt" type="number" min="1" max="30" step="1" value="5">
+          <span>m</span>
+          <button id="takeoffBtn" data-cmd="takeoff" class="cmd warn">Takeoff</button>
+        </div>
+        <div class="cmd-row">
+          <select id="modeSel"></select>
+          <button id="modeBtn" data-cmd="mode" class="cmd">Set mode</button>
+        </div>
+        <div id="cmdResult" class="cmd-result"></div>
+      </section>
+
+      <!-- ----- Flight data (HUD) ----- -->
+      <section class="panel" id="hudPanel">
+        <div class="panel-head"><span>Flight data</span></div>
+        <div class="hud-grid">
+          <div class="card">
+            <div class="label">Altitude (rel)</div>
+            <div class="value"><span id="hudAlt">--</span> <small>m</small></div>
+            <div class="sub">MSL <span id="hudAltMsl">--</span> m</div>
+          </div>
+          <div class="card">
+            <div class="label">Ground speed</div>
+            <div class="value"><span id="hudSpeed">--</span> <small>m/s</small></div>
+            <div class="sub"><span id="hudSpeedKmh">--</span> km/h</div>
+          </div>
+          <div class="card">
+            <div class="label">Heading</div>
+            <div class="value"><span id="hudHeading">--</span></div>
+            <div class="sub" id="hudCompass">--</div>
+          </div>
+          <div class="card">
+            <div class="label">Battery</div>
+            <div class="value"><span id="hudBatt">--</span></div>
+            <div class="sub"><span id="hudBattPct">-- %</span></div>
+            <div class="bar"><div id="hudBattBar"></div></div>
+          </div>
+          <div class="card">
+            <div class="label">Flight mode</div>
+            <div class="value"><span id="hudMode">---</span></div>
+            <div class="sub"><span id="hudArmed" class="badge">DISARMED</span></div>
+          </div>
+          <div class="card">
+            <div class="label">GPS</div>
+            <div class="value"><span id="hudGps">No GPS</span></div>
+            <div class="sub"><span id="hudSats">0</span> sats · HDOP <span id="hudHdop">--</span></div>
+          </div>
+          <div class="card wide">
+            <div class="label">Position</div>
+            <div class="sub mono">Lat <span id="hudLat">--</span> &nbsp; Lon <span id="hudLon">--</span></div>
+          </div>
+          <div class="card wide">
+            <div class="label">Last message from drone</div>
+            <div class="sub" id="hudStatusText">--</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ----- Drone messages (Phase 2) ----- -->
+      <section class="panel">
+        <div class="panel-head"><span>Drone messages</span></div>
+        <div id="msgLog" class="msg-log">No messages yet</div>
+      </section>
+
+    </aside>
+  </main>
+
+  <!-- ===== Confirmation dialog (Phase 2) ===== -->
+  <div id="modal" class="modal-bg" hidden>
+    <div class="modal">
+      <h3 id="modalTitle"></h3>
+      <p id="modalText"></p>
+      <label id="modalCheckRow" class="check-row">
+        <input type="checkbox" id="modalCheck"> <span id="modalCheckText"></span>
+      </label>
+      <div class="modal-btns">
+        <button id="modalCancel">Cancel</button>
+        <button id="modalOk" class="primary">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="/static/app.js"></script>
+  <script src="/static/commands.js"></script>
+</body>
+</html>

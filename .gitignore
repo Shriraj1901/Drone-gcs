@@ -1,0 +1,20 @@
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# PyInstaller output (share the exe through GitHub Releases instead)
+build/
+dist/
+
+# Secrets and local settings
+.env
+
+# Flight logs and recordings
+logs/*
+!logs/.gitkeep
+
+# Editor / OS files
+.vscode/
+Thumbs.db

@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+pymavlink
+pyserial
+opencv-python
+python-dotenv
