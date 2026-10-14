@@ -154,3 +154,24 @@ button.lock.open { background: rgba(229,72,77,.2); border-color: var(--red); col
 .modal p { margin: 0 0 12px; line-height: 1.45; }
 .check-row { display: flex; gap: 8px; align-items: flex-start; margin-bottom: 14px; cursor: pointer; font-size: 13px; }
 .modal-btns { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* ================= Phase 2B: calibration ================= */
+.cal-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-bottom: 6px; }
+button.cmd.attn { border-color: var(--amber); box-shadow: 0 0 0 1px var(--amber); }
+.cal-body { background: var(--panel2); border-radius: 8px; padding: 10px; margin-top: 4px; }
+.cal-msg { font-size: 13px; line-height: 1.4; margin-bottom: 8px; }
+.cal-msg.ok { color: var(--green); }
+.cal-msg.bad { color: var(--red); }
+.cal-row { margin-bottom: 8px; }
+.cal-label { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-bottom: 3px; }
+.cal-track { height: 10px; background: #2b3544; border-radius: 5px; overflow: hidden; }
+.cal-fill { height: 100%; width: 0; background: var(--blue); transition: width .3s; }
+.cal-fill.ok { background: var(--green); }
+.cal-fill.bad { background: var(--red); }
+.dots { display: flex; gap: 6px; margin-bottom: 8px; }
+.dot { width: 14px; height: 14px; border-radius: 50%; background: #2b3544; border: 2px solid transparent; }
+.dot.done { background: var(--green); }
+.dot.now { background: var(--amber); border-color: var(--amber); }
+.pos-text { font-size: 18px; font-weight: 700; margin-bottom: 4px; }
+.pos-hint { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+.cal-actions { display: flex; gap: 8px; margin-top: 6px; }

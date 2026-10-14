@@ -4,8 +4,13 @@ mavlink_service.py - talks to the flight controller (or the simulator).
 It runs in its OWN THREAD so it never blocks the web server or the video.
 The thread keeps a Telemetry object up to date; the web server just reads it.
 
-PHASE 2: commands. The web server never writes to the port itself. It puts a
+PHASE 2A: commands. The web server never writes to the port itself. It puts a
 command in a queue; THIS thread sends it and waits for the drone's COMMAND_ACK.
+
+PHASE 2B: calibration. Compass, accelerometer and level calibration use the same
+command path. While a calibration runs, messages from the drone (MAG_CAL_PROGRESS,
+MAG_CAL_REPORT, and position requests) update Telemetry.calibration, which the
+browser shows live.
 """
 import logging
 import math
@@ -22,8 +27,10 @@ from serial.tools import list_ports
 from pymavlink import mavutil
 
 import config
-from backend.models import (ALLOWED_MODES, COPTER_MODES, ConnectRequest,
-                            GPS_FIX_TEXT, Telemetry)
+from backend.models import (ACCEL_FAILED, ACCEL_POSITIONS, ACCEL_SUCCESS, ALLOWED_MODES,
+                            CAL_ACTIVE, COPTER_MODES, MSG_COMPASS, MSG_SAMPLING,
+                            ConnectRequest, GPS_FIX_TEXT, Telemetry, accel_message,
+                            blank_compass, new_calibration)
 from backend.simulator import FakeDrone
 
 log = logging.getLogger("mavlink")
@@ -39,6 +46,16 @@ MAV_RESULT_TEXT = {0: "accepted", 1: "temporarily rejected (try again)",
                    2: "denied", 3: "not supported by this firmware",
                    4: "failed", 5: "in progress", 6: "cancelled"}
 
+# ---- Phase 2B: calibration constants ----
+CAL_START_KINDS = ("cal_compass", "cal_accel", "cal_level")
+CAL_CANCEL_KINDS = ("cal_cancel_compass", "cal_cancel_accel")
+FLIGHT_KINDS = ("arm", "disarm", "takeoff", "land", "rtl", "mode")
+CMD_START_MAG_CAL = 42424        # MAV_CMD_DO_START_MAG_CAL
+CMD_CANCEL_MAG_CAL = 42426       # MAV_CMD_DO_CANCEL_MAG_CAL
+CMD_ACCELCAL_POS = 42429         # MAV_CMD_ACCELCAL_VEHICLE_POS
+MAG_STATUS_TEXT = {0: "Not started", 1: "Waiting", 2: "Step 1", 3: "Step 2",
+                   4: "Success", 5: "Failed", 6: "Bad orientation", 7: "Bad radius"}
+
 
 def list_serial_ports() -> list:
     """Return the COM ports Windows (or Linux) can see."""
@@ -50,13 +67,16 @@ def list_serial_ports() -> list:
 class PendingCommand:
     """One command travelling through: queue -> sent -> acknowledged."""
 
-    def __init__(self, kind, label, mav_command=None, params=None, mode="", alt=0.0):
-        self.kind = kind                  # arm | disarm | takeoff | mode
+    def __init__(self, kind, label, mav_command=None, params=None, mode="",
+                 alt=0.0, value=0.0, timeout=None):
+        self.kind = kind                  # arm | disarm | takeoff | mode | cal_* ...
         self.label = label                # text shown to the user
         self.mav_command = mav_command    # MAVLink command number
         self.params = params or [0] * 7   # the 7 command parameters
         self.mode = mode
         self.alt = alt
+        self.value = value                # extra number (accel position)
+        self.timeout = timeout or config.COMMAND_TIMEOUT_S
         self.created = time.time()
         self.sent_at = 0.0
         self.cancelled = False
@@ -72,7 +92,8 @@ class PendingCommand:
 
 class MavlinkService:
     def __init__(self):
-        self._lock = threading.Lock()          # protects the data below
+        # RLock: the same thread may take this lock twice (handlers call each other).
+        self._lock = threading.RLock()
         self._telem = Telemetry()
         self._conn = {"state": "disconnected", "message": "Not connected",
                       "conn_type": "", "target": ""}
@@ -120,21 +141,47 @@ class MavlinkService:
                     "time": time.time()}
 
     # ------------------------------------------------------------------
-    # Phase 2: commands (called from the web server thread)
+    # Commands (called from the web server thread)
     # ------------------------------------------------------------------
     def send_command(self, kind: str, mode: str = "", alt: float = 0.0) -> dict:
         """Check safety rules, queue the command, wait for the drone's answer."""
         with self._cmd_lock:                   # never two commands at once
+            value = 0.0
+            # "cal_cancel" and "accel_ready" depend on what the calibration is doing now
+            if kind == "cal_cancel":
+                kind = self._resolve_cancel()
+                if kind is None:
+                    return {"ok": False, "message": "No calibration is running."}
+            elif kind == "accel_ready":
+                value, problem = self._accel_position_to_confirm()
+                if problem:
+                    return {"ok": False, "message": problem}
+
             error = self._check_allowed(kind, mode, alt)
             if error:
                 return {"ok": False, "message": error}
-            cmd = self._make_command(kind, mode, alt)
+            cmd = self._make_command(kind, mode, alt, value)
             self._cmd_queue.put(cmd)
-            if not cmd.done.wait(config.COMMAND_TIMEOUT_S + 2.0):
+            if not cmd.done.wait(cmd.timeout + 2.0):
                 cmd.cancelled = True           # never send it late!
                 return {"ok": False,
                         "message": "No answer. Command cancelled - check the connection."}
             return {"ok": cmd.ok, "message": cmd.message}
+
+    def _resolve_cancel(self):
+        with self._lock:
+            c = self._telem.calibration
+            if c["state"] not in CAL_ACTIVE:
+                return None
+            return "cal_cancel_compass" if c["kind"] == "compass" else "cal_cancel_accel"
+
+    def _accel_position_to_confirm(self):
+        """Which position is the drone waiting for? Returns (position, error_text)."""
+        with self._lock:
+            c = self._telem.calibration
+            if c["kind"] != "accel" or c["state"] != "waiting_position":
+                return 0, "The drone is not asking for a position right now."
+            return c["position"], None
 
     def _check_allowed(self, kind: str, mode: str, alt: float):
         """SAFETY RULES (enforced here, not just in the buttons).
@@ -144,17 +191,20 @@ class MavlinkService:
             state = self._conn["state"]
             link_ok, armed = t.link_ok, t.armed
             alt_rel, cur_mode, is_copter = t.alt_rel, t.mode, t.is_copter
+            cal_busy = t.calibration["state"] in CAL_ACTIVE
 
         if state != "connected":
             return "Not connected to a drone."
         if not link_ok:
             return "Link lost - command NOT sent."
-        if not is_copter:
-            return "Commands are only enabled for multicopters in this version."
+        if kind in FLIGHT_KINDS and not is_copter:
+            return "Flight commands are only enabled for multicopters in this version."
 
         if kind == "arm":
             if armed:
                 return "Already armed."
+            if cal_busy:
+                return "A calibration is running. Finish or cancel it before arming."
         elif kind == "disarm":
             if not armed:
                 return "Already disarmed."
@@ -179,12 +229,25 @@ class MavlinkService:
                 return "Mode %s is not allowed from the app." % (mode or "?")
             if mode == cur_mode:
                 return "Already in %s mode." % mode
+        # ---- Phase 2B ----
+        elif kind in CAL_START_KINDS:
+            if armed or alt_rel > 1.0:
+                return "Calibration is only allowed while DISARMED and on the ground."
+            if cal_busy:
+                return "A calibration is already running. Finish or cancel it first."
+        elif kind in CAL_CANCEL_KINDS or kind == "accel_ready":
+            pass                               # already checked in send_command
+        elif kind == "reboot":
+            if armed or alt_rel > 1.0:
+                return "Refused: never reboot the flight controller while armed or airborne."
+            if cal_busy:
+                return "Finish or cancel the calibration first."
         else:
             return "Unknown command."
         return None
 
     @staticmethod
-    def _make_command(kind: str, mode: str, alt: float) -> PendingCommand:
+    def _make_command(kind: str, mode: str, alt: float, value: float = 0.0) -> PendingCommand:
         m = mavutil.mavlink
         if kind == "arm":
             return PendingCommand("arm", "Arm", m.MAV_CMD_COMPONENT_ARM_DISARM,
@@ -196,6 +259,45 @@ class MavlinkService:
             return PendingCommand("takeoff", "Takeoff to %g m" % alt,
                                   m.MAV_CMD_NAV_TAKEOFF,
                                   [0, 0, 0, 0, 0, 0, alt], alt=alt)
+
+        # ---- Phase 2B ----
+        # Compass: p1 = which compasses (0 = all), p2 = retry (0), p3 = autosave (1),
+        #          p4 = delay (0), p5 = auto-reboot (0: we ask you to reboot)
+        if kind == "cal_compass":
+            return PendingCommand(
+                kind, "Compass calibration",
+                getattr(m, "MAV_CMD_DO_START_MAG_CAL", CMD_START_MAG_CAL),
+                [0, 0, 1, 0, 0, 0, 0], timeout=config.CAL_COMMAND_TIMEOUT_S)
+        # Accelerometer: PREFLIGHT_CALIBRATION with param5 = 1 (full 6-position)
+        if kind == "cal_accel":
+            return PendingCommand(
+                kind, "Accelerometer calibration", m.MAV_CMD_PREFLIGHT_CALIBRATION,
+                [0, 0, 0, 0, 1, 0, 0], timeout=config.CAL_COMMAND_TIMEOUT_S)
+        # Level: PREFLIGHT_CALIBRATION with param5 = 2 (board level)
+        if kind == "cal_level":
+            return PendingCommand(
+                kind, "Level calibration", m.MAV_CMD_PREFLIGHT_CALIBRATION,
+                [0, 0, 0, 0, 2, 0, 0], timeout=config.CAL_COMMAND_TIMEOUT_S)
+        if kind == "cal_cancel_compass":
+            return PendingCommand(
+                kind, "Cancel compass calibration",
+                getattr(m, "MAV_CMD_DO_CANCEL_MAG_CAL", CMD_CANCEL_MAG_CAL),
+                [0, 0, 0, 0, 0, 0, 0])
+        if kind == "cal_cancel_accel":      # all zeros = "stop what you are doing"
+            return PendingCommand(
+                kind, "Cancel accelerometer calibration",
+                m.MAV_CMD_PREFLIGHT_CALIBRATION, [0, 0, 0, 0, 0, 0, 0])
+        # "Ready" button: tell the drone it is now in the position it asked for
+        if kind == "accel_ready":
+            return PendingCommand(
+                kind, "Position %d confirmed" % int(value),
+                getattr(m, "MAV_CMD_ACCELCAL_VEHICLE_POS", CMD_ACCELCAL_POS),
+                [value, 0, 0, 0, 0, 0, 0], value=value)
+        if kind == "reboot":
+            return PendingCommand(
+                kind, "Reboot flight controller",
+                m.MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN, [1, 0, 0, 0, 0, 0, 0])
+
         # land / rtl / mode are all "set flight mode" commands
         name = {"land": "LAND", "rtl": "RTL"}.get(kind, mode)
         return PendingCommand("mode", "Mode " + name, m.MAV_CMD_DO_SET_MODE,
@@ -203,7 +305,7 @@ class MavlinkService:
                                COPTER_MODES[name], 0, 0, 0, 0, 0], mode=name)
 
     # ------------------------------------------------------------------
-    # Phase 2: commands (run inside the MAVLink thread)
+    # Commands (run inside the MAVLink thread)
     # ------------------------------------------------------------------
     def _process_commands(self, master, fake=None) -> None:
         """Send queued commands, and give up on ones that never got an ACK."""
@@ -212,22 +314,27 @@ class MavlinkService:
                 cmd = self._cmd_queue.get_nowait()
             except queue.Empty:
                 break
-            if cmd.cancelled or time.time() - cmd.created > config.COMMAND_TIMEOUT_S:
+            if cmd.cancelled or time.time() - cmd.created > cmd.timeout:
                 cmd.finish(False, cmd.label + ": expired before sending.")
                 continue
             if fake is not None:                       # simulation mode
-                self._finish_with_code(cmd, fake.handle_command(cmd.kind, cmd.mode, cmd.alt))
+                code = fake.handle_command(cmd.kind, cmd.mode, cmd.alt, cmd.value)
+                self._finish_with_code(cmd, code, sim=True)
             else:                                      # real drone
                 master.mav.command_long_send(
                     master.target_system, master.target_component,
                     cmd.mav_command, 0, *cmd.params)
                 cmd.sent_at = time.time()
                 self._pending.append(cmd)
+                if cmd.kind in CAL_START_KINDS:
+                    with self._lock:
+                        self._telem.calibration = new_calibration(
+                            cmd.kind[4:], "starting", "Waiting for the drone to accept...")
 
         # commands sent but never acknowledged
         now = time.time()
         for cmd in list(self._pending):
-            if now - cmd.sent_at < config.COMMAND_TIMEOUT_S:
+            if now - cmd.sent_at < cmd.timeout:
                 continue
             self._pending.remove(cmd)
             with self._lock:
@@ -235,15 +342,23 @@ class MavlinkService:
             worked = ((cmd.kind == "arm" and armed) or
                       (cmd.kind == "disarm" and not armed) or
                       (cmd.kind == "mode" and mode == cmd.mode))
-            if worked:
+            if cmd.kind == "reboot":
+                cmd.finish(True, "Reboot command sent. The link will drop and reconnect.")
+            elif worked:
                 cmd.finish(True, cmd.label + ": done (no ACK, but the drone reports it).")
             else:
+                if cmd.kind in CAL_START_KINDS:
+                    with self._lock:
+                        self._telem.calibration = new_calibration(
+                            cmd.kind[4:], "failed",
+                            "The drone did not answer the calibration command.")
                 cmd.finish(False, cmd.label + ": no reply from the drone. Check the "
                            "HUD and messages before trying again.")
 
-    @staticmethod
-    def _finish_with_code(cmd: PendingCommand, code: int) -> None:
+    def _finish_with_code(self, cmd: PendingCommand, code: int, sim: bool = False) -> None:
         word = MAV_RESULT_TEXT.get(code, "result %s" % code)
+        if not sim:
+            self._cal_on_result(cmd, code)             # update the calibration status
         if code == 0:
             cmd.finish(True, "%s: %s by the drone." % (cmd.label, word))
         else:
@@ -280,6 +395,142 @@ class MavlinkService:
                            "sev": int(severity), "text": text})
         del t.messages[:-config.MESSAGE_LOG_SIZE]
         t.status_text = text
+
+    # ------------------------------------------------------------------
+    # Phase 2B: calibration status (the caller holds self._lock where noted)
+    # ------------------------------------------------------------------
+    def _cal_on_result(self, cmd: PendingCommand, code: int) -> None:
+        """The drone answered a calibration-related command."""
+        with self._lock:
+            t = self._telem
+            c = t.calibration
+            if cmd.kind in CAL_START_KINDS:
+                if code != 0:
+                    t.calibration = new_calibration(
+                        cmd.kind[4:], "failed",
+                        "The drone did not accept the calibration. "
+                        "Read 'Drone messages' for the reason.")
+                elif cmd.kind == "cal_level":
+                    t.calibration = new_calibration(
+                        "level", "success",
+                        "Level calibration done. The drone now treats this position as level.")
+                elif c["state"] == "starting":         # compass or accel accepted
+                    c["state"] = "running"
+                    c["message"] = (MSG_COMPASS if cmd.kind == "cal_compass" else
+                                    "Keep the drone still: calibrating gyros...")
+            elif cmd.kind in CAL_CANCEL_KINDS:
+                t.calibration = new_calibration("", "idle", "Calibration cancelled.")
+            elif cmd.kind == "accel_ready" and code == 0:
+                if c["kind"] == "accel" and c["state"] == "waiting_position":
+                    c["state"] = "running"
+                    c["confirmed"] = int(cmd.value)
+                    c["message"] = MSG_SAMPLING
+
+    def _cal_fail_if_active(self, text: str) -> None:
+        with self._lock:
+            c = self._telem.calibration
+            if c["state"] in CAL_ACTIVE:
+                self._telem.calibration = new_calibration(c["kind"], "failed", text)
+                self._push_message(4, text)
+
+    def _cal_mag_progress(self, msg) -> None:
+        """MAG_CAL_PROGRESS: percent done for one compass. (caller holds the lock)"""
+        t = self._telem
+        c = t.calibration
+        status = int(msg.cal_status)
+        if c["kind"] != "compass" or c["state"] not in CAL_ACTIVE:
+            if status not in (1, 2, 3):
+                return                      # stray message after we finished: ignore
+            c = t.calibration = new_calibration("compass", "running", MSG_COMPASS)
+        ids = [i for i in range(8) if int(msg.cal_mask) & (1 << i)]
+        if ids:
+            c["expected"] = ids
+        for i in c["expected"]:             # show a bar for every compass right away
+            c["compasses"].setdefault(str(i), blank_compass())
+        comp = c["compasses"].setdefault(str(int(msg.compass_id)), blank_compass())
+        comp["pct"] = int(msg.completion_pct)
+        comp["status"] = MAG_STATUS_TEXT.get(status, "")
+        c["state"] = "running"
+        c["message"] = MSG_COMPASS
+
+    def _cal_mag_report(self, msg) -> None:
+        """MAG_CAL_REPORT: final result for one compass. (caller holds the lock)"""
+        t = self._telem
+        c = t.calibration
+        if c["kind"] != "compass" or c["state"] not in CAL_ACTIVE:
+            c = t.calibration = new_calibration("compass", "running", MSG_COMPASS)
+        status = int(msg.cal_status)
+        cid = str(int(msg.compass_id))
+        comp = c["compasses"].setdefault(cid, blank_compass())
+        comp["done"] = True
+        comp["ok"] = (status == 4)
+        comp["fitness"] = round(float(msg.fitness), 1)
+        comp["status"] = MAG_STATUS_TEXT.get(status, "")
+        if comp["ok"]:
+            comp["pct"] = 100
+
+        expected = [str(i) for i in c["expected"]] or [cid]
+        if all(c["compasses"].get(i, {}).get("done") for i in expected):
+            bad = [c["compasses"][i] for i in expected if not c["compasses"][i]["ok"]]
+            if not bad:
+                c["state"] = "success"
+                c["message"] = ("Compass calibration finished and saved. "
+                                "Reboot the flight controller to apply it.")
+                self._push_message(6, "Compass calibration successful")
+            else:
+                c["state"] = "failed"
+                why = bad[0]["status"]
+                if why == "Bad orientation":
+                    c["message"] = ("Failed: bad orientation. Check that the compass is "
+                                    "mounted the way the COMPASS_ORIENT setting says.")
+                elif why == "Bad radius":
+                    c["message"] = ("Failed: bad radius. There is magnetic interference. "
+                                    "Move away from metal, or move the compass away from power wires.")
+                else:
+                    c["message"] = "Compass calibration failed. Try again outdoors, away from metal."
+                self._push_message(4, c["message"])
+
+    def _cal_accel_request(self, position: int) -> None:
+        """The drone asks for a position, or reports the end. (caller holds the lock)"""
+        t = self._telem
+        c = t.calibration
+        if c["kind"] != "accel" or c["state"] not in CAL_ACTIVE:
+            return                          # not our calibration: ignore
+        if position == ACCEL_SUCCESS:
+            c["state"] = "success"
+            c["step"] = 6
+            c["message"] = ("Accelerometer calibration successful. "
+                            "Reboot the flight controller to apply it.")
+            self._push_message(6, "Accelerometer calibration successful")
+        elif position == ACCEL_FAILED:
+            t.calibration = new_calibration(
+                "accel", "failed", "Accelerometer calibration FAILED. Try again on a flat, steady surface.")
+            self._push_message(4, "Accelerometer calibration failed")
+        elif position in ACCEL_POSITIONS:
+            if c["state"] == "running" and c["confirmed"] == position:
+                return                      # the drone repeats its request while sampling
+            c["state"] = "waiting_position"
+            c["position"] = position
+            c["position_text"] = ACCEL_POSITIONS[position]
+            c["step"] = position
+            c["message"] = accel_message(position)
+
+    def _cal_from_text(self, text: str) -> None:
+        """Older firmware only sends text for accelerometer calibration: read it."""
+        c = self._telem.calibration
+        if c["kind"] != "accel" or c["state"] not in CAL_ACTIVE:
+            return
+        low = text.lower()
+        if "place vehicle" in low:
+            pos = (4 if "nose down" in low else 5 if "nose up" in low else
+                   6 if "back" in low else 2 if "left" in low else
+                   3 if "right" in low else 1 if "level" in low else 0)
+            if pos:
+                self._cal_accel_request(pos)
+        elif "calibration successful" in low:
+            self._cal_accel_request(ACCEL_SUCCESS)
+        elif "calibration failed" in low:
+            self._cal_accel_request(ACCEL_FAILED)
 
     # ------------------------------------------------------------------
     # Internals
@@ -348,6 +599,7 @@ class MavlinkService:
                     except Exception:
                         pass
                 self._abort_commands("link closed.")
+                self._cal_fail_if_active("Link closed during calibration. Start it again.")
                 with self._lock:
                     self._telem.link_ok = False
 
@@ -439,7 +691,7 @@ class MavlinkService:
             if msg is not None:
                 self._handle(msg, master)
 
-            self._process_commands(master)     # Phase 2: send queued commands
+            self._process_commands(master)     # send queued commands
 
             # --- link status from heartbeat age ---
             silent_for = time.time() - self._last_heartbeat
@@ -452,6 +704,7 @@ class MavlinkService:
             elif not link_ok and link_was_ok:
                 self._set_conn(stop, "connected",
                                "LINK LOST - no heartbeat, waiting...")
+                self._cal_fail_if_active("Link lost during calibration. Start it again.")
             link_was_ok = link_ok
 
             if silent_for > config.RECONNECT_AFTER_S:
@@ -517,7 +770,20 @@ class MavlinkService:
                 t.home_lon = msg.longitude / 1e7
 
             elif mtype == "COMMAND_ACK":
-                self._on_ack(msg)               # Phase 2
+                self._on_ack(msg)
+
+            # ---- Phase 2B: calibration messages ----
+            elif mtype == "MAG_CAL_PROGRESS":
+                self._cal_mag_progress(msg)
+
+            elif mtype == "MAG_CAL_REPORT":
+                self._cal_mag_report(msg)
+
+            elif mtype == "COMMAND_LONG":
+                # During accelerometer calibration the DRONE sends us this to say
+                # "put me in position N" (or "finished" / "failed").
+                if msg.command == CMD_ACCELCAL_POS:
+                    self._cal_accel_request(int(round(msg.param1)))
 
             elif mtype == "STATUSTEXT":
                 text = msg.text
@@ -526,3 +792,4 @@ class MavlinkService:
                 text = str(text).strip("\x00").strip()
                 if text:
                     self._push_message(msg.severity, text)
+                    self._cal_from_text(text)

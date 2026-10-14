@@ -1,15 +1,18 @@
 """
 simulator.py - a fake drone for testing with no hardware and no SITL.
 
-It is now a tiny "flight simulator": it starts DISARMED on the ground and
-obeys the same commands as the real drone (arm, takeoff, modes, land, RTL).
-So you can test the Phase 2 buttons completely safely.
+It starts DISARMED on the ground and obeys the same commands as the real drone
+(arm, takeoff, modes, land, RTL) and, since Phase 2B, it also pretends to run
+the compass, accelerometer and level calibrations.
 """
+import copy
 import math
 import time
 
 import config
-from backend.models import COPTER_MODES, Telemetry
+from backend.models import (ACCEL_POSITIONS, CAL_ACTIVE, COPTER_MODES, MSG_COMPASS,
+                            MSG_SAMPLING, Telemetry, accel_message, blank_compass,
+                            new_calibration)
 
 M_PER_DEG_LAT = 111_320.0
 RTL_ALT_M = 15.0           # RTL climbs to this height first (like ArduPilot)
@@ -33,6 +36,12 @@ class FakeDrone:
         self.battery = 100.0
         self.idle_s = 0.0
         self._outbox = [(6, "Simulation running (fake data)")]
+        # ---- calibration (Phase 2B) ----
+        self.cal = new_calibration()
+        self._cal_t0 = 0.0        # when the fake compass calibration started
+        self._acc_phase = ""      # "", "gyro", "wait" or "sample"
+        self._acc_pos = 0         # which of the 6 positions we are on
+        self._acc_until = 0.0     # time when the current phase ends
 
     # ------------------------------------------------------------------
     # messages (like the drone's STATUSTEXT)
@@ -47,10 +56,14 @@ class FakeDrone:
     # ------------------------------------------------------------------
     # commands - return a MAV_RESULT code (0 = accepted, 4 = failed ...)
     # ------------------------------------------------------------------
-    def handle_command(self, kind: str, mode: str = "", alt: float = 0.0) -> int:
+    def handle_command(self, kind: str, mode: str = "", alt: float = 0.0,
+                       value: float = 0.0) -> int:
         if kind == "arm":
             if self.armed:
                 return 0
+            if self.cal["state"] in CAL_ACTIVE:
+                self.say(4, "PreArm: calibration in progress")
+                return 4
             if self.mode in ("AUTO", "RTL", "LAND"):
                 self.say(4, "PreArm: cannot arm in " + self.mode + " mode")
                 return 4
@@ -89,7 +102,121 @@ class FakeDrone:
                 self.climbing = False
             return 0
 
+        # ---------------- Phase 2B ----------------
+        if kind in ("cal_compass", "cal_accel", "cal_level"):
+            if self.armed or self.alt > 0.5:
+                self.say(4, "Calibration refused: vehicle is armed")
+                return 4
+            if self.cal["state"] in CAL_ACTIVE:
+                return 1                      # temporarily rejected
+            return self._start_cal(kind)
+
+        if kind in ("cal_cancel_compass", "cal_cancel_accel"):
+            self.cal = new_calibration("", "idle", "Calibration cancelled.")
+            self._acc_phase = ""
+            self.say(6, "Calibration cancelled")
+            return 0
+
+        if kind == "accel_ready":
+            c = self.cal
+            if (c["kind"] != "accel" or c["state"] != "waiting_position"
+                    or int(value) != self._acc_pos):
+                return 4
+            c["state"] = "running"
+            c["message"] = MSG_SAMPLING
+            c["confirmed"] = self._acc_pos
+            self._acc_phase = "sample"
+            self._acc_until = time.time() + config.SIM_ACCEL_SAMPLE_S
+            return 0
+
+        if kind == "reboot":
+            if self.armed:
+                self.say(4, "Reboot refused: vehicle is armed")
+                return 4
+            self.mode = "STABILIZE"
+            self.cal = new_calibration()
+            self.say(6, "Rebooting flight controller (simulated)")
+            return 0
+
         return 3
+
+    def _start_cal(self, kind: str) -> int:
+        now = time.time()
+        if kind == "cal_level":
+            self.cal = new_calibration(
+                "level", "success",
+                "Level calibration done. The drone now treats this position as level.")
+            self.say(6, "Trim OK (simulated)")
+            return 0
+
+        if kind == "cal_compass":
+            c = new_calibration("compass", "running", MSG_COMPASS)
+            c["expected"] = [0, 1]
+            for cid in ("0", "1"):
+                c["compasses"][cid] = blank_compass()
+            self.cal = c
+            self._cal_t0 = now
+            self.say(6, "Compass calibration started (simulated)")
+            return 0
+
+        # accelerometer: gyros first, then the six positions
+        self.cal = new_calibration("accel", "running",
+                                   "Keep the drone still: calibrating gyros...")
+        self._acc_phase = "gyro"
+        self._acc_until = now + 2.0
+        self._acc_pos = 0
+        self.say(6, "Accelerometer calibration started (simulated)")
+        return 0
+
+    def _accel_request(self, pos: int) -> None:
+        """The (fake) drone asks you to place it in position 1..6."""
+        c = self.cal
+        c["state"] = "waiting_position"
+        c["position"] = pos
+        c["position_text"] = ACCEL_POSITIONS[pos]
+        c["step"] = pos
+        c["message"] = accel_message(pos)
+        self._acc_pos = pos
+        self._acc_phase = "wait"
+        self.say(6, "Place vehicle %s and press any key." % ACCEL_POSITIONS[pos])
+
+    def _cal_tick(self, now: float) -> None:
+        """Move the fake calibration forward in time."""
+        c = self.cal
+        if c["state"] not in CAL_ACTIVE:
+            return
+
+        if c["kind"] == "compass":
+            elapsed = now - self._cal_t0
+            for cid, rate in zip(("0", "1"), config.SIM_COMPASS_RATES):
+                comp = c["compasses"][cid]
+                if comp["done"]:
+                    continue
+                comp["pct"] = min(100, int(elapsed * rate))
+                comp["status"] = "Step 1" if comp["pct"] < 50 else "Step 2"
+                if comp["pct"] >= 100:
+                    comp["done"], comp["ok"] = True, True
+                    comp["fitness"] = 8.4 if cid == "0" else 11.9
+                    comp["status"] = "Success"
+            if all(x["done"] for x in c["compasses"].values()):
+                c["state"] = "success"
+                c["message"] = ("Compass calibration finished and saved. "
+                                "Reboot the flight controller to apply it.")
+                self.say(6, "Compass calibration successful (simulated)")
+
+        elif c["kind"] == "accel":
+            if self._acc_phase == "gyro" and now >= self._acc_until:
+                self._accel_request(1)
+            elif self._acc_phase == "sample" and now >= self._acc_until:
+                if self._acc_pos >= 6:
+                    c["state"] = "success"
+                    c["step"] = 6
+                    c["message"] = ("Accelerometer calibration successful. "
+                                    "Reboot the flight controller to apply it.")
+                    self._acc_phase = ""
+                    self.say(6, "Calibration successful")
+                else:
+                    self._accel_request(self._acc_pos + 1)
 
     # ------------------------------------------------------------------
     # physics
@@ -100,6 +227,7 @@ class FakeDrone:
         dt = min(now - self._last, 0.5)
         self._last = now
         self._physics(dt)
+        self._cal_tick(now)
         self._fill(t, now)
 
     def _physics(self, dt: float) -> None:
@@ -209,3 +337,4 @@ class FakeDrone:
         t.link_ok = True
         t.vehicle_type = "Quadcopter (simulated)"
         t.is_copter = True
+        t.calibration = copy.deepcopy(self.cal)     # Phase 2B

@@ -22,6 +22,43 @@ COPTER_MODES = {
 # Modes the "Set mode" dropdown may request (Land and RTL have their own buttons).
 ALLOWED_MODES = ("STABILIZE", "ALT_HOLD", "LOITER", "POSHOLD", "GUIDED", "AUTO")
 
+# ---------------- Phase 2B: calibration ----------------
+# A calibration is "active" while it is starting, running, or waiting for you.
+CAL_ACTIVE = ("starting", "running", "waiting_position")
+
+# The six positions of the accelerometer calibration (numbers ArduPilot uses).
+ACCEL_POSITIONS = {
+    1: "LEVEL", 2: "on its LEFT side", 3: "on its RIGHT side",
+    4: "NOSE DOWN", 5: "NOSE UP", 6: "on its BACK (upside down)",
+}
+ACCEL_SUCCESS = 16777215      # special "position" numbers the drone sends at the end
+ACCEL_FAILED = 16777216
+
+MSG_COMPASS = ("Rotate the drone slowly so every side points at the ground. "
+               "Keep going until all bars reach 100%.")
+MSG_SAMPLING = "Hold the drone perfectly still while it samples..."
+
+
+def accel_message(position: int) -> str:
+    return "Place the drone %s, then press Ready." % ACCEL_POSITIONS.get(position, "?")
+
+
+def blank_compass() -> dict:
+    return {"pct": 0, "status": "Waiting", "done": False, "ok": None, "fitness": None}
+
+
+def new_calibration(kind: str = "", state: str = "idle", message: str = "") -> dict:
+    """The calibration status shown in the browser.
+    kind:  compass | accel | level | ""        state: idle | starting | running |
+    waiting_position | success | failed"""
+    return {"kind": kind, "state": state, "message": message,
+            "compasses": {},        # compass id -> progress (compass calibration)
+            "expected": [],         # compass ids we wait for
+            "position": 0,          # position the drone asks for (accel calibration)
+            "position_text": "",
+            "confirmed": 0,         # last position you confirmed with "Ready"
+            "step": 0, "steps": 6}
+
 
 @dataclass
 class Telemetry:
@@ -52,6 +89,7 @@ class Telemetry:
     vehicle_type: str = "Unknown"
     is_copter: bool = False
     messages: list = field(default_factory=list)   # recent drone messages
+    calibration: dict = field(default_factory=new_calibration)   # Phase 2B
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -74,6 +112,6 @@ class VideoRequest(BaseModel):
 
 class CommandRequest(BaseModel):
     """What the browser sends when you confirm a command."""
-    command: str                  # arm | disarm | takeoff | land | rtl | mode
+    command: str                  # arm | disarm | takeoff | land | rtl | mode | cal_* ...
     mode: str = ""                # only used by "mode"
     altitude: float = 0.0         # only used by "takeoff" (metres)

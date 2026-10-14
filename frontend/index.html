@@ -54,7 +54,7 @@
       </div>
     </section>
 
-    <!-- ===== Right column: video + commands + HUD + messages ===== -->
+    <!-- ===== Right column: video + commands + calibration + HUD + messages ===== -->
     <aside class="side">
 
       <!-- ----- Live video ----- -->
@@ -79,7 +79,7 @@
         </div>
       </section>
 
-      <!-- ----- Commands (Phase 2) ----- -->
+      <!-- ----- Commands (Phase 2A) ----- -->
       <section class="panel" id="cmdPanel">
         <div class="panel-head">
           <span>Commands</span>
@@ -102,6 +102,35 @@
           <button id="modeBtn" data-cmd="mode" class="cmd">Set mode</button>
         </div>
         <div id="cmdResult" class="cmd-result"></div>
+      </section>
+
+      <!-- ----- Calibration (Phase 2B) ----- -->
+      <section class="panel" id="calPanel">
+        <div class="panel-head">
+          <span>Calibration</span>
+          <span id="calPill" class="pill grey">Idle</span>
+        </div>
+        <div id="calNote" class="cmd-note"></div>
+        <div class="cal-grid">
+          <button id="calCompassBtn" class="cmd">Compass</button>
+          <button id="calAccelBtn" class="cmd">Accel</button>
+          <button id="calLevelBtn" class="cmd">Level</button>
+          <button id="calRebootBtn" class="cmd">Reboot FC</button>
+        </div>
+        <div id="calBody" class="cal-body" hidden>
+          <div id="calMsg" class="cal-msg"></div>
+          <div id="calBars"></div>
+          <div id="calPos" hidden>
+            <div id="calDots" class="dots"></div>
+            <div id="calPosText" class="pos-text"></div>
+            <div id="calPosHint" class="pos-hint"></div>
+          </div>
+          <div class="cal-actions">
+            <button id="calReadyBtn" class="primary" hidden>Ready: start sampling</button>
+            <button id="calCancelBtn" hidden>Cancel calibration</button>
+          </div>
+        </div>
+        <div id="calResult" class="cmd-result"></div>
       </section>
 
       <!-- ----- Flight data (HUD) ----- -->
@@ -150,7 +179,7 @@
         </div>
       </section>
 
-      <!-- ----- Drone messages (Phase 2) ----- -->
+      <!-- ----- Drone messages ----- -->
       <section class="panel">
         <div class="panel-head"><span>Drone messages</span></div>
         <div id="msgLog" class="msg-log">No messages yet</div>
@@ -159,7 +188,7 @@
     </aside>
   </main>
 
-  <!-- ===== Confirmation dialog (Phase 2) ===== -->
+  <!-- ===== Confirmation dialog ===== -->
   <div id="modal" class="modal-bg" hidden>
     <div class="modal">
       <h3 id="modalTitle"></h3>
@@ -177,5 +206,6 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="/static/app.js"></script>
   <script src="/static/commands.js"></script>
+  <script src="/static/calibration.js"></script>
 </body>
 </html>

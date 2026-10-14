@@ -101,9 +101,12 @@ def status():
 # ---------------- Phase 2: commands ----------------
 @app.post("/api/command")
 def command(req: CommandRequest):
-    """Arm / disarm / takeoff / land / rtl / mode. The safety rules live in
-    MavlinkService.send_command, so they apply no matter who calls this."""
-    if req.command not in ("arm", "disarm", "takeoff", "land", "rtl", "mode"):
+    """Arm / disarm / takeoff / land / rtl / mode / calibration / reboot. The safety
+    rules live in MavlinkService.send_command, so they apply no matter who calls this."""
+    allowed = ("arm", "disarm", "takeoff", "land", "rtl", "mode",
+               "cal_compass", "cal_accel", "cal_level", "cal_cancel",
+               "accel_ready", "reboot")
+    if req.command not in allowed:
         raise HTTPException(400, "Unknown command")
     return mav.send_command(req.command, req.mode.strip().upper(), req.altitude)
 

@@ -50,3 +50,7 @@ MAX_TAKEOFF_ALT_M = 30.0
 MESSAGE_LOG_SIZE = 25         # how many drone messages the panel keeps
 SIM_CLIMB_MS = 2.5            # fake drone climb speed (m/s)
 SIM_AUTO_DISARM_S = 10.0      # fake drone disarms itself if you do not take off
+# ---------- Phase 2B: calibration ----------
+CAL_COMMAND_TIMEOUT_S = 15.0  # accel/level start with a gyro calibration, which can take a few seconds
+SIM_COMPASS_RATES = (5.0, 4.0)  # fake compass progress in % per second (compass 0 and 1)
+SIM_ACCEL_SAMPLE_S = 2.5      # fake drone "samples" each position for this long
