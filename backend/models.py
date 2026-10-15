@@ -2,7 +2,7 @@
 models.py - the "shapes" of the data passed around the app.
 """
 from dataclasses import dataclass, asdict, field
-from typing import Optional
+from typing import List, Optional
 
 from pydantic import BaseModel
 
@@ -60,6 +60,17 @@ def new_calibration(kind: str = "", state: str = "idle", message: str = "") -> d
             "step": 0, "steps": 6}
 
 
+def new_mission_state() -> dict:
+    """Mission status shown in the browser (Phase 2C).
+    state: idle | uploading | downloading | clearing | ok | error"""
+    return {"state": "idle", "message": "", "done": 0, "total": 0,
+            "count": -1,             # items stored on the drone as far as we know (-1 = unknown)
+            "first_takeoff": False,  # the stored mission starts with a takeoff item
+            "current_seq": -1,       # mission item the drone is working on
+            "current_wp": -1,        # ... as a waypoint number (0 = first waypoint)
+            "reached_wp": -1}        # last waypoint the drone reached
+
+
 @dataclass
 class Telemetry:
     """Latest known drone state. Sent to the browser ~10 times per second."""
@@ -90,6 +101,7 @@ class Telemetry:
     is_copter: bool = False
     messages: list = field(default_factory=list)   # recent drone messages
     calibration: dict = field(default_factory=new_calibration)   # Phase 2B
+    mission: dict = field(default_factory=new_mission_state)     # Phase 2C
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -112,6 +124,21 @@ class VideoRequest(BaseModel):
 
 class CommandRequest(BaseModel):
     """What the browser sends when you confirm a command."""
-    command: str                  # arm | disarm | takeoff | land | rtl | mode | cal_* ...
+    command: str                  # arm | disarm | takeoff | land | rtl | mode | cal_* | mission_start
     mode: str = ""                # only used by "mode"
     altitude: float = 0.0         # only used by "takeoff" (metres)
+
+
+class WaypointModel(BaseModel):
+    """One waypoint sent by the mission planner."""
+    lat: float
+    lon: float
+    alt: float = 20.0             # metres above home
+    speed: float = 0.0            # m/s, 0 = keep the current speed
+
+
+class MissionPlanRequest(BaseModel):
+    """What the browser sends when you press Upload."""
+    takeoff_alt: float = 0.0      # 0 = no takeoff item
+    finish: str = "rtl"           # rtl | land | none
+    waypoints: List[WaypointModel] = []

@@ -3,7 +3,8 @@ simulator.py - a fake drone for testing with no hardware and no SITL.
 
 It starts DISARMED on the ground and obeys the same commands as the real drone
 (arm, takeoff, modes, land, RTL) and, since Phase 2B, it also pretends to run
-the compass, accelerometer and level calibrations.
+the compass, accelerometer and level calibrations. Since Phase 2C it also stores a
+mission and flies it when you switch to AUTO.
 """
 import copy
 import math
@@ -42,6 +43,12 @@ class FakeDrone:
         self._acc_phase = ""      # "", "gyro", "wait" or "sample"
         self._acc_pos = 0         # which of the 6 positions we are on
         self._acc_until = 0.0     # time when the current phase ends
+        # ---- mission (Phase 2C) ----
+        self.mission = []         # the items the "drone" has stored (item 0 = home)
+        self.seq_to_wp = []
+        self.mis_seq = 1          # item being flown
+        self.mis_speed = 0.0      # speed set by a "change speed" item (0 = default)
+        self.mis_reached_wp = -1  # last WAYPOINT reached
 
     # ------------------------------------------------------------------
     # messages (like the drone's STATUSTEXT)
@@ -100,6 +107,9 @@ class FakeDrone:
             self.mode = mode
             if mode != "GUIDED":
                 self.climbing = False
+            if mode == "AUTO" and self.mission and self.mis_seq >= len(self.mission):
+                self.mis_seq = 1                  # the last mission finished: start again
+                self.mis_speed = 0.0
             return 0
 
         # ---------------- Phase 2B ----------------
@@ -139,6 +149,81 @@ class FakeDrone:
             return 0
 
         return 3
+
+    # ------------------------------------------------------------------
+    # mission storage (what the real drone keeps in its memory)
+    # ------------------------------------------------------------------
+    def mission_upload(self, items: list, seq_to_wp: list) -> None:
+        self.mission = copy.deepcopy(items)
+        self.seq_to_wp = list(seq_to_wp)
+        self.mis_seq, self.mis_speed, self.mis_reached_wp = 1, 0.0, -1
+
+    def mission_download(self) -> list:
+        return copy.deepcopy(self.mission)
+
+    def mission_clear(self) -> None:
+        self.mission, self.seq_to_wp = [], []
+        self.mis_seq, self.mis_speed, self.mis_reached_wp = 1, 0.0, -1
+
+    def _to_local(self, lat: float, lon: float):
+        """GPS position -> metres north / east of home."""
+        home_lat, home_lon = config.SIM_HOME_LAT, config.SIM_HOME_LON
+        north = (lat - home_lat) * M_PER_DEG_LAT
+        east = (lon - home_lon) * M_PER_DEG_LAT * math.cos(math.radians(home_lat))
+        return north, east
+
+    def _mis_next(self) -> None:
+        """The current mission item is finished: go on to the next one."""
+        wp = self.seq_to_wp[self.mis_seq] if self.mis_seq < len(self.seq_to_wp) else -1
+        if wp >= 0:
+            self.mis_reached_wp = wp
+        self.say(6, "Reached command #%d" % self.mis_seq)
+        self.mis_seq += 1
+        if self.mis_seq >= len(self.mission):
+            self.say(6, "Mission complete")
+
+    def _run_mission(self, dt: float) -> None:
+        """Fly the stored mission, one item at a time (used in AUTO mode)."""
+        items = self.mission
+        if self.mis_seq >= len(items):
+            return                                  # finished: just hover
+        it = items[self.mis_seq]
+        cmd = it["command"]
+
+        if cmd == 178:                              # change speed
+            self.mis_speed = it["p2"] if it["p2"] > 0 else 0.0
+            self._mis_next()
+
+        elif cmd == 22:                             # takeoff
+            if self.alt < it["z"] - 0.2:
+                self.alt = min(it["z"], self.alt + config.SIM_CLIMB_MS * dt)
+                self.vz = config.SIM_CLIMB_MS
+            else:
+                self._mis_next()
+
+        elif cmd == 16:                             # waypoint
+            tn, te = self._to_local(it["x"], it["y"])
+            self._move_toward(tn, te, self.mis_speed or config.SIM_WP_SPEED_MS, dt)
+            dz = it["z"] - self.alt                 # also fly to the waypoint's altitude
+            if abs(dz) > 0.05:
+                step = min(abs(dz), config.SIM_CLIMB_MS * dt)
+                self.alt += math.copysign(step, dz)
+                self.vz = math.copysign(config.SIM_CLIMB_MS, dz)
+            if math.hypot(tn - self.north, te - self.east) < 2.0 and abs(dz) < 1.0:
+                self._mis_next()
+
+        elif cmd == 20:                             # return to launch
+            self.say(6, "Mission: return to launch")
+            self.mode = "RTL"
+            self._mis_next()
+
+        elif cmd == 21:                             # land
+            self._descend(dt, 1.0)
+            if not self.armed:
+                self._mis_next()
+
+        else:
+            self._mis_next()
 
     def _start_cal(self, kind: str) -> int:
         now = time.time()
@@ -243,6 +328,8 @@ class FakeDrone:
             self._descend(dt, 1.0)
         elif self.mode == "RTL":
             self._rtl(dt)
+        elif self.mode == "AUTO" and self.mission:
+            self._run_mission(dt)
         elif self.mode == "AUTO" and self.alt > 2.0:
             self._orbit(dt)
         elif self.mode == "GUIDED" and self.climbing:
@@ -338,3 +425,9 @@ class FakeDrone:
         t.vehicle_type = "Quadcopter (simulated)"
         t.is_copter = True
         t.calibration = copy.deepcopy(self.cal)     # Phase 2B
+        # mission progress (Phase 2C). The upload/download status is kept by MissionManager.
+        cur = self.mis_seq if self.mission else -1
+        t.mission["current_seq"] = cur
+        t.mission["current_wp"] = (self.seq_to_wp[cur]
+                                   if 0 <= cur < len(self.seq_to_wp) else -1)
+        t.mission["reached_wp"] = self.mis_reached_wp

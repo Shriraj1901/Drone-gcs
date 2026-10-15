@@ -45,12 +45,57 @@
 
   <main>
     <!-- ===== Map ===== -->
-    <section class="map-panel">
+    <section class="map-panel" id="mapPanel">
       <div id="map"></div>
       <div class="map-tools">
         <label><input type="checkbox" id="followChk" checked> Follow drone</label>
         <button id="centerBtn">Center</button>
         <button id="clearTrailBtn">Clear trail</button>
+      </div>
+
+      <!-- ----- Mission planner (Phase 2C): floats over the map ----- -->
+      <div class="mission-panel" id="missionPanel">
+        <div class="mission-head">
+          <span>🗺 Mission planner</span>
+          <span id="mPill" class="pill grey">Ready</span>
+          <button id="mToggle" class="mini" title="Show / hide">&ndash;</button>
+        </div>
+        <div id="mBody">
+          <div class="m-row">
+            <button id="mAddBtn">➕ Add waypoints: OFF</button>
+            <label>Alt <input id="mDefAlt" type="number" min="2" max="120" step="1" value="20"> m</label>
+            <label>Speed <input id="mDefSpeed" type="number" min="0" max="15" step="0.5" value="0"> m/s</label>
+          </div>
+          <div class="m-row">
+            <label><input type="checkbox" id="mTakeoffOn" checked> Takeoff to
+              <input id="mTakeoffAlt" type="number" min="1" max="120" step="1" value="10"> m</label>
+            <label>Finish
+              <select id="mFinish">
+                <option value="rtl">Return home (RTL)</option>
+                <option value="land">Land at last waypoint</option>
+                <option value="none">Hover (do nothing)</option>
+              </select></label>
+          </div>
+          <div class="m-table-wrap">
+            <table class="m-table">
+              <thead><tr><th>#</th><th>Position</th><th>Alt m</th><th>Speed</th><th></th></tr></thead>
+              <tbody id="mRows"></tbody>
+            </table>
+            <div id="mEmpty" class="m-empty">Press "Add waypoints", then click the map. Drag a marker to move it.</div>
+          </div>
+          <div id="mSummary" class="m-summary"></div>
+          <div class="m-row">
+            <button id="mUploadBtn" class="primary">⬆ Upload</button>
+            <button id="mDownloadBtn">⬇ Download</button>
+            <button id="mClearDroneBtn">Clear drone</button>
+            <button id="mClearPlanBtn">Clear plan</button>
+          </div>
+          <div class="m-row">
+            <button id="mStartBtn" class="cmd warn">▶ Start mission (AUTO)</button>
+            <span id="mProgress" class="m-progress"></span>
+          </div>
+          <div id="mResult" class="cmd-result"></div>
+        </div>
       </div>
     </section>
 
@@ -207,5 +252,6 @@
   <script src="/static/app.js"></script>
   <script src="/static/commands.js"></script>
   <script src="/static/calibration.js"></script>
+  <script src="/static/mission.js"></script>
 </body>
 </html>

@@ -175,3 +175,39 @@ button.cmd.attn { border-color: var(--amber); box-shadow: 0 0 0 1px var(--amber)
 .pos-text { font-size: 18px; font-weight: 700; margin-bottom: 4px; }
 .pos-hint { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
 .cal-actions { display: flex; gap: 8px; margin-top: 6px; }
+
+
+/* ================= Phase 2C: mission planner ================= */
+.mission-panel {
+  position: absolute; left: 10px; bottom: 28px; z-index: 1000;
+  width: 470px; max-width: calc(100% - 20px); max-height: 62%; overflow-y: auto;
+  background: rgba(23,29,37,.96); border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px 10px;
+}
+.mission-head { display: flex; align-items: center; gap: 10px; font-weight: 600; margin-bottom: 6px; }
+.mission-head .pill { margin-left: auto; }
+button.mini { padding: 2px 8px; }
+.m-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 6px; }
+.m-row label { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); }
+.m-row input[type="number"] { width: 62px; padding: 3px 6px; }
+.m-table-wrap { max-height: 150px; overflow-y: auto; background: var(--panel2); border-radius: 6px; margin-bottom: 6px; }
+.m-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.m-table th { text-align: left; color: var(--muted); font-weight: 600; padding: 4px 6px; position: sticky; top: 0; background: var(--panel2); }
+.m-table td { padding: 2px 6px; border-top: 1px solid var(--border); }
+.m-table input { width: 58px; padding: 2px 5px; font-size: 12px; }
+.m-table td.mono { font-family: Consolas, monospace; font-size: 11px; color: var(--muted); }
+.m-table td.num { cursor: pointer; font-weight: 700; }
+.m-table button { padding: 1px 7px; }
+.m-empty { padding: 10px; color: var(--muted); font-size: 12px; }
+.m-summary { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+.m-progress { font-size: 12px; color: var(--muted); }
+button.add-on { background: rgba(46,204,113,.22); border-color: var(--green); color: var(--green); font-weight: 700; }
+.map-panel.adding .leaflet-container, .map-panel.adding .leaflet-grab { cursor: crosshair !important; }
+.wp-wrap { background: none; border: none; }
+.wp-marker {
+  width: 28px; height: 28px; border-radius: 50%; background: var(--blue); color: #fff;
+  font-weight: 800; font-size: 13px; text-align: center; line-height: 24px;
+  border: 2px solid #fff; box-shadow: 0 1px 4px rgba(0,0,0,.5);
+}
+.wp-marker.current { background: var(--amber); color: #000; }
+.wp-marker.reached { background: var(--green); color: #000; }

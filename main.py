@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 
 import config
 from backend.mavlink_service import MavlinkService, list_serial_ports
-from backend.models import CommandRequest, ConnectRequest, VideoRequest
+from backend.models import CommandRequest, ConnectRequest, MissionPlanRequest, VideoRequest
 from backend.video_service import VideoService
 
 logging.basicConfig(level=logging.INFO,
@@ -98,17 +98,35 @@ def status():
     return mav.snapshot()
 
 
-# ---------------- Phase 2: commands ----------------
+# ---------------- commands, calibration and mission start (Phase 2) ----------------
 @app.post("/api/command")
 def command(req: CommandRequest):
-    """Arm / disarm / takeoff / land / rtl / mode / calibration / reboot. The safety
+    """Arm / disarm / takeoff / land / rtl / mode / calibration / reboot / mission start. The safety
     rules live in MavlinkService.send_command, so they apply no matter who calls this."""
     allowed = ("arm", "disarm", "takeoff", "land", "rtl", "mode",
                "cal_compass", "cal_accel", "cal_level", "cal_cancel",
-               "accel_ready", "reboot")
+               "accel_ready", "reboot", "mission_start")
     if req.command not in allowed:
         raise HTTPException(400, "Unknown command")
     return mav.send_command(req.command, req.mode.strip().upper(), req.altitude)
+
+
+# ---------------- mission planning (Phase 2C) ----------------
+@app.post("/api/mission/upload")
+def mission_upload(req: MissionPlanRequest):
+    waypoints = [{"lat": w.lat, "lon": w.lon, "alt": w.alt, "speed": w.speed}
+                 for w in req.waypoints]
+    return mav.upload_mission(req.takeoff_alt, req.finish, waypoints)
+
+
+@app.post("/api/mission/download")
+def mission_download():
+    return mav.download_mission()
+
+
+@app.post("/api/mission/clear")
+def mission_clear():
+    return mav.clear_mission()
 
 
 # ---------------- video ----------------

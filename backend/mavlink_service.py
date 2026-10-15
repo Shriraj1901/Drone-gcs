@@ -11,6 +11,9 @@ PHASE 2B: calibration. Compass, accelerometer and level calibration use the same
 command path. While a calibration runs, messages from the drone (MAG_CAL_PROGRESS,
 MAG_CAL_REPORT, and position requests) update Telemetry.calibration, which the
 browser shows live.
+
+PHASE 2C: missions. Uploading / downloading waypoints is a longer conversation with the
+drone; it lives in mission_service.py (MissionManager) and is plugged in below.
 """
 import logging
 import math
@@ -31,6 +34,7 @@ from backend.models import (ACCEL_FAILED, ACCEL_POSITIONS, ACCEL_SUCCESS, ALLOWE
                             CAL_ACTIVE, COPTER_MODES, MSG_COMPASS, MSG_SAMPLING,
                             ConnectRequest, GPS_FIX_TEXT, Telemetry, accel_message,
                             blank_compass, new_calibration)
+from backend.mission_service import MissionManager
 from backend.simulator import FakeDrone
 
 log = logging.getLogger("mavlink")
@@ -104,6 +108,8 @@ class MavlinkService:
         self._cmd_lock = threading.Lock()      # one command at a time
         self._cmd_queue = queue.Queue()        # web thread -> mavlink thread
         self._pending = []                     # sent, waiting for ACK (mavlink thread only)
+        # --- Phase 2C: missions ---
+        self.missions = MissionManager(self)
 
     # ------------------------------------------------------------------
     # Public API (called by main.py)
@@ -128,6 +134,7 @@ class MavlinkService:
             t.join(timeout=3)
         self._thread = None
         self._abort_commands("connection closed.")
+        self.missions.abort("connection closed.")
         with self._lock:
             self._telem = Telemetry()
             self._conn = {"state": "disconnected", "message": "Disconnected",
@@ -147,8 +154,15 @@ class MavlinkService:
         """Check safety rules, queue the command, wait for the drone's answer."""
         with self._cmd_lock:                   # never two commands at once
             value = 0.0
+            label = None
+            # "Start mission" = the mission safety checks, then a normal switch to AUTO
+            if kind == "mission_start":
+                problem = self.missions.check_start()
+                if problem:
+                    return {"ok": False, "message": problem}
+                kind, mode, label = "mode", "AUTO", "Start mission (AUTO)"
             # "cal_cancel" and "accel_ready" depend on what the calibration is doing now
-            if kind == "cal_cancel":
+            elif kind == "cal_cancel":
                 kind = self._resolve_cancel()
                 if kind is None:
                     return {"ok": False, "message": "No calibration is running."}
@@ -161,12 +175,24 @@ class MavlinkService:
             if error:
                 return {"ok": False, "message": error}
             cmd = self._make_command(kind, mode, alt, value)
+            if label:
+                cmd.label = label
             self._cmd_queue.put(cmd)
             if not cmd.done.wait(cmd.timeout + 2.0):
                 cmd.cancelled = True           # never send it late!
                 return {"ok": False,
                         "message": "No answer. Command cancelled - check the connection."}
             return {"ok": cmd.ok, "message": cmd.message}
+
+    # ---- Phase 2C: missions (the work is done in mission_service.py) ----
+    def upload_mission(self, takeoff_alt: float, finish: str, waypoints: list) -> dict:
+        return self.missions.upload(takeoff_alt, finish, waypoints)
+
+    def download_mission(self) -> dict:
+        return self.missions.download()
+
+    def clear_mission(self) -> dict:
+        return self.missions.clear()
 
     def _resolve_cancel(self):
         with self._lock:
@@ -558,6 +584,7 @@ class MavlinkService:
                 self._run_sim(stop)
             finally:
                 self._abort_commands("simulation stopped.")
+                self.missions.abort("simulation stopped.")
             return
 
         target = self._target_text(req)
@@ -599,6 +626,7 @@ class MavlinkService:
                     except Exception:
                         pass
                 self._abort_commands("link closed.")
+                self.missions.abort("link closed.")
                 self._cal_fail_if_active("Link closed during calibration. Start it again.")
                 with self._lock:
                     self._telem.link_ok = False
@@ -610,6 +638,7 @@ class MavlinkService:
         self._set_conn(stop, "connected", "Simulation mode: fake telemetry")
         while not stop.is_set():
             self._process_commands(None, fake)
+            self.missions.process(None, fake)          # Phase 2C
             with self._lock:
                 fake.step(self._telem)
                 for severity, text in fake.drain():
@@ -660,6 +689,7 @@ class MavlinkService:
                            (24, 2),    # GPS_RAW_INT (fix, satellites)
                            (30, 5),    # ATTITUDE
                            (33, 5),    # GLOBAL_POSITION_INT
+                           (42, 2),    # MISSION_CURRENT (which waypoint is active)
                            (74, 5)]:   # VFR_HUD
             master.mav.command_long_send(ts, tc, set_interval, 0,
                                          msg_id, int(1_000_000 / hz), 0, 0, 0, 0, 0)
@@ -692,6 +722,7 @@ class MavlinkService:
                 self._handle(msg, master)
 
             self._process_commands(master)     # send queued commands
+            self.missions.process(master)      # Phase 2C: mission upload / download
 
             # --- link status from heartbeat age ---
             silent_for = time.time() - self._last_heartbeat
@@ -784,6 +815,17 @@ class MavlinkService:
                 # "put me in position N" (or "finished" / "failed").
                 if msg.command == CMD_ACCELCAL_POS:
                     self._cal_accel_request(int(round(msg.param1)))
+
+            # ---- Phase 2C: mission messages ----
+            elif mtype in ("MISSION_REQUEST_INT", "MISSION_REQUEST", "MISSION_COUNT",
+                           "MISSION_ACK", "MISSION_ITEM_INT", "MISSION_ITEM"):
+                self.missions.on_message(msg, master)
+
+            elif mtype == "MISSION_CURRENT":
+                self.missions.on_current(msg)
+
+            elif mtype == "MISSION_ITEM_REACHED":
+                self.missions.on_reached(msg)
 
             elif mtype == "STATUSTEXT":
                 text = msg.text

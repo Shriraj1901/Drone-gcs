@@ -54,3 +54,18 @@ SIM_AUTO_DISARM_S = 10.0      # fake drone disarms itself if you do not take off
 CAL_COMMAND_TIMEOUT_S = 15.0  # accel/level start with a gyro calibration, which can take a few seconds
 SIM_COMPASS_RATES = (5.0, 4.0)  # fake compass progress in % per second (compass 0 and 1)
 SIM_ACCEL_SAMPLE_S = 2.5      # fake drone "samples" each position for this long
+
+
+# ---------- Phase 2C: mission planning ----------
+MAX_WAYPOINTS = 60            # most waypoints allowed in one mission
+MIN_WP_ALT_M = 2.0            # waypoint altitude limits (metres above home)
+MAX_WP_ALT_M = 120.0
+MIN_WP_SPEED_MS = 0.5         # waypoint speed limits (0 means "leave the speed as it is")
+MAX_WP_SPEED_MS = 15.0
+MAX_WP_DISTANCE_M = 2000.0    # farthest a waypoint may be from home
+MIN_MISSION_BATTERY_PCT = 25  # refuse to start a mission below this battery level
+MISSION_TIMEOUT_S = 20.0      # base time allowed for an upload/download (plus 1 s per item)
+MISSION_RETRY_S = 1.5         # resend a message if the drone has not answered in this time
+MISSION_MAX_RETRIES = 5
+SIM_WP_SPEED_MS = 10.0        # fake drone speed on a mission when no speed is set
+SIM_AUTO_DISARM_S = 30.0      # overrides the 10 s above: gives you time to confirm the Start dialog
